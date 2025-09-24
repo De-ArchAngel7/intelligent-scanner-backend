@@ -303,13 +303,13 @@ def extract_total_amount(text: str) -> Optional[float]:
     # If no clear currency patterns found, look for the largest reasonable number
     if not has_false_positives:
         numbers = re.findall(r'\b(\d+\.?\d{2})\b', text)  # Only 2 decimal places
-    if numbers:
-        try:
+        if numbers:
+            try:
                 amounts = [float(num) for num in numbers if 0.01 <= float(num) <= 10000]
-            if amounts:
+                if amounts:
                     return max(amounts)  # Return the largest reasonable amount
-        except ValueError:
-            pass
+            except ValueError:
+                pass
     
     return None
 

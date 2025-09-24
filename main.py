@@ -161,27 +161,35 @@ def extract_vendor_name(text: str) -> Optional[str]:
     lines = text.split('\n')
     
     # Look for common business indicators
-    business_indicators = ['restaurant', 'cafe', 'store', 'shop', 'company', 'inc', 'llc', 'corp', 'bank', 'pay', 'opay', 'paypal', 'stripe']
+    business_indicators = ['restaurant', 'cafe', 'store', 'shop', 'company', 'inc', 'llc', 'corp', 'bank', 'pay', 'opay', 'paypal', 'stripe', 'hospital', 'clinic', 'university', 'college', 'hotel', 'gas station']
     
-    # First, look for specific payment platforms
-    payment_platforms = ['OPay', 'PayPal', 'Stripe', 'Square', 'Venmo', 'Cash App', 'Zelle']
-    for platform in payment_platforms:
-        if platform.lower() in text.lower():
-            return platform
+    # First, look for specific payment platforms and major companies
+    known_companies = ['OPay', 'PayPal', 'Stripe', 'Square', 'Venmo', 'Cash App', 'Zelle', 'Amazon', 'Google', 'Microsoft', 'Apple', 'Netflix', 'Spotify', 'Uber', 'Lyft', 'Airbnb']
+    for company in known_companies:
+        if company.lower() in text.lower():
+            return company
     
-    for line in lines[:8]:  # Check first 8 lines
+    # Look for business names in the first few lines
+    for line in lines[:10]:  # Check first 10 lines
         line = line.strip()
         if len(line) > 3 and not re.match(r'^\d+$', line):
             # Skip bullet points and special characters
             if line.startswith('•') or line.startswith('-') or line.startswith('*'):
                 line = line[1:].strip()
             
+            # Skip common non-business words
+            skip_words = ['receipt', 'invoice', 'bill', 'statement', 'transaction', 'payment', 'total', 'amount', 'date', 'time']
+            if any(skip_word in line.lower() for skip_word in skip_words):
+                continue
+            
             # Check if line contains business indicators
             if any(indicator in line.lower() for indicator in business_indicators):
                 return line
-            # Check if line looks like a business name (no numbers, reasonable length)
-            if not re.search(r'\d{4,}', line) and 3 <= len(line) <= 50:
-            return line
+            # Check if line looks like a business name (no excessive numbers, reasonable length)
+            if not re.search(r'\d{4,}', line) and 3 <= len(line) <= 60:
+                # Additional check: should contain letters
+                if re.search(r'[a-zA-Z]', line):
+                    return line
     
     return None
 
@@ -229,13 +237,19 @@ def extract_total_amount(text: str) -> Optional[float]:
     """Extract total amount using various patterns with better filtering"""
     # Look for currency patterns with better context
     currency_patterns = [
-        # Dollar patterns
+        # Business invoice patterns
         r'total[:\s]*\$?(\d+\.?\d{1,2})',  # Allow 1-2 decimal places
         r'amount[:\s]*\$?(\d+\.?\d{1,2})',
         r'sum[:\s]*\$?(\d+\.?\d{1,2})',
         r'grand\s*total[:\s]*\$?(\d+\.?\d{1,2})',
         r'subtotal[:\s]*\$?(\d+\.?\d{1,2})',
         r'amount\s*due[:\s]*\$?(\d+\.?\d{1,2})',
+        r'balance[:\s]*\$?(\d+\.?\d{1,2})',
+        r'outstanding[:\s]*\$?(\d+\.?\d{1,2})',
+        r'payment\s*due[:\s]*\$?(\d+\.?\d{1,2})',
+        r'net\s*amount[:\s]*\$?(\d+\.?\d{1,2})',
+        r'final\s*amount[:\s]*\$?(\d+\.?\d{1,2})',
+        # Currency symbol patterns
         r'\$(\d+\.?\d{1,2})',  # Dollar sign with 1-2 decimals
         r'(\d+\.?\d{1,2})\s*dollars?',
         # Korean Won patterns
@@ -245,6 +259,8 @@ def extract_total_amount(text: str) -> Optional[float]:
         r'€(\d+\.?\d{1,2})',  # Euro
         r'£(\d+\.?\d{1,2})',  # Pound
         r'¥(\d+\.?\d{1,2})',  # Yen
+        r'₹(\d+\.?\d{1,2})',  # Indian Rupee
+        r'₽(\d+\.?\d{1,2})',  # Russian Ruble
         # More flexible patterns
         r'total[:\s]*\$?(\d+\.?\d*)',  # Any decimal places
         r'amount[:\s]*\$?(\d+\.?\d*)',
@@ -298,22 +314,44 @@ def extract_total_amount(text: str) -> Optional[float]:
     return None
 
 def categorize_invoice(text: str) -> str:
-    """Simple categorization based on keywords"""
+    """Comprehensive categorization based on keywords"""
     text_lower = text.lower()
     
     # Banking/Finance indicators (check first as they're most specific)
-    if any(word in text_lower for word in ['bank', 'banking', 'transaction', 'payment', 'transfer', 'opay', 'paypal', 'stripe', 'recipient', 'sender', 'account', 'deposit', 'withdrawal']):
+    if any(word in text_lower for word in ['bank', 'banking', 'transaction', 'payment', 'transfer', 'opay', 'paypal', 'stripe', 'recipient', 'sender', 'account', 'deposit', 'withdrawal', 'credit card', 'debit card']):
         return 'Banking & Finance'
-    elif any(word in text_lower for word in ['restaurant', 'food', 'dining', 'cafe', 'bar']):
+    # Business/Professional documents
+    elif any(word in text_lower for word in ['invoice', 'bill', 'statement', 'invoice number', 'bill number', 'due date', 'payment due', 'amount due', 'total due', 'outstanding', 'balance']):
+        return 'Business Invoice'
+    elif any(word in text_lower for word in ['contract', 'agreement', 'terms', 'conditions', 'signature', 'signed', 'legal', 'lawyer', 'attorney']):
+        return 'Legal Document'
+    elif any(word in text_lower for word in ['medical', 'doctor', 'hospital', 'clinic', 'pharmacy', 'prescription', 'medicine', 'health', 'insurance', 'patient']):
+        return 'Healthcare'
+    elif any(word in text_lower for word in ['education', 'school', 'university', 'college', 'tuition', 'student', 'course', 'training', 'certificate']):
+        return 'Education'
+    elif any(word in text_lower for word in ['government', 'tax', 'irs', 'revenue', 'license', 'permit', 'registration', 'official', 'public']):
+        return 'Government'
+    elif any(word in text_lower for word in ['insurance', 'policy', 'coverage', 'claim', 'premium', 'deductible']):
+        return 'Insurance'
+    elif any(word in text_lower for word in ['utility', 'electric', 'water', 'gas', 'internet', 'phone', 'cable', 'internet bill', 'electric bill']):
+        return 'Utilities'
+    elif any(word in text_lower for word in ['subscription', 'monthly', 'annual', 'recurring', 'membership', 'plan']):
+        return 'Subscription'
+    # Retail/Consumer
+    elif any(word in text_lower for word in ['restaurant', 'food', 'dining', 'cafe', 'bar', 'coffee', 'meal']):
         return 'Food & Dining'
-    elif any(word in text_lower for word in ['gas', 'fuel', 'petrol', 'station']):
+    elif any(word in text_lower for word in ['gas', 'fuel', 'petrol', 'station', 'gas station', 'fuel station']):
         return 'Transportation'
-    elif any(word in text_lower for word in ['hotel', 'lodging', 'accommodation']):
+    elif any(word in text_lower for word in ['hotel', 'lodging', 'accommodation', 'booking', 'reservation', 'travel']):
         return 'Travel'
-    elif any(word in text_lower for word in ['grocery', 'supermarket', 'store', 'market']):
+    elif any(word in text_lower for word in ['grocery', 'supermarket', 'store', 'market', 'shopping', 'retail']):
         return 'Groceries'
-    elif any(word in text_lower for word in ['office', 'supplies', 'stationery']):
+    elif any(word in text_lower for word in ['office', 'supplies', 'stationery', 'business', 'workplace']):
         return 'Office Supplies'
+    elif any(word in text_lower for word in ['entertainment', 'movie', 'cinema', 'theater', 'concert', 'show', 'ticket']):
+        return 'Entertainment'
+    elif any(word in text_lower for word in ['shopping', 'retail', 'store', 'purchase', 'buy', 'sale']):
+        return 'Shopping'
     else:
         return 'Other'
 

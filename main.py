@@ -228,6 +228,12 @@ async def extract_invoice_data(file: UploadFile = File(...)):
                 raw_text = pytesseract.image_to_string(image, config='--psm 6')
             except Exception as e:
                 print(f"Basic OCR also failed: {e}")
+                # If Tesseract is not available, provide a helpful error
+                if "tesseract is not installed" in str(e).lower():
+                    raise HTTPException(
+                        status_code=500,
+                        detail="OCR service is temporarily unavailable. Please try again later or contact support."
+                    )
                 raw_text = None
         
         if not raw_text or len(raw_text.strip()) < 3:

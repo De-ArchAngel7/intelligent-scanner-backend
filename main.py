@@ -253,8 +253,8 @@ def extract_total_amount(text: str) -> Optional[float]:
         r'\$(\d+\.?\d{1,2})',  # Dollar sign with 1-2 decimals
         r'(\d+\.?\d{1,2})\s*dollars?',
         # Korean Won patterns
-        r'₩(\d+\.?\d{1,2})',  # Korean Won symbol
-        r'(\d+\.?\d{1,2})\s*won',
+        r'₩(\d+(?:,\d{3})*(?:\.\d{1,2})?)',  # Korean Won symbol with commas
+        r'(\d+(?:,\d{3})*(?:\.\d{1,2})?)\s*won',
         # Other currency patterns
         r'€(\d+\.?\d{1,2})',  # Euro
         r'£(\d+\.?\d{1,2})',  # Pound
@@ -293,9 +293,11 @@ def extract_total_amount(text: str) -> Optional[float]:
         matches = re.findall(pattern, text, re.IGNORECASE)
         if matches:
             try:
-                amount = float(matches[0])
-                # Reasonable range for invoice amounts
-                if 0.01 <= amount <= 10000:
+                # Remove commas from the matched amount
+                amount_str = matches[0].replace(',', '')
+                amount = float(amount_str)
+                # Reasonable range for invoice amounts (including Korean Won)
+                if 0.01 <= amount <= 1000000:  # Increased range for Korean Won
                     return amount
             except ValueError:
                 continue
@@ -409,8 +411,28 @@ async def extract_invoice_data(file: UploadFile = File(...)):
                 detail="Could not extract text from the uploaded file. Please try a clearer image or PDF."
             )
         
-        # Calculate confidence based on text length and content quality
-        confidence = min(0.95, 0.3 + (len(raw_text) / 1000) * 0.4)
+        # Calculate confidence based on extraction success and text quality
+        extracted_fields = 0
+        total_fields = 4  # vendor, date, amount, category
+        
+        # Check what we can extract
+        vendor = extract_vendor_name(raw_text)
+        date = extract_date(raw_text)
+        amount = extract_total_amount(raw_text)
+        category = categorize_invoice(raw_text)
+        
+        if vendor: extracted_fields += 1
+        if date: extracted_fields += 1
+        if amount: extracted_fields += 1
+        if category and category != "Other": extracted_fields += 1
+        
+        # Base confidence on extraction success
+        extraction_confidence = (extracted_fields / total_fields) * 0.8
+        
+        # Add text quality factor
+        text_quality = min(0.2, len(raw_text) / 2000)  # Up to 20% for text quality
+        
+        confidence = min(0.95, extraction_confidence + text_quality)
         confidence_scores = [confidence]
         
         if not raw_text.strip():
@@ -422,11 +444,7 @@ async def extract_invoice_data(file: UploadFile = File(...)):
         # Calculate average confidence
         avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
         
-        # Parse structured data
-        vendor = extract_vendor_name(raw_text)
-        date = extract_date(raw_text)
-        total_amount = extract_total_amount(raw_text)
-        category = categorize_invoice(raw_text)
+        # Get transaction status (not used in confidence calculation)
         transaction_status = detect_transaction_status(raw_text)
         
         return ExtractionResult(

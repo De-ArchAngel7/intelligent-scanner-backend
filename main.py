@@ -3,13 +3,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter
+import fitz  # PyMuPDF
 import pandas as pd
 import re
 import io
 from datetime import datetime
 import json
 import os
+import numpy as np
 
 app = FastAPI(title="Intelligent Scanner API", version="1.0.0")
 
@@ -26,20 +28,73 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure Tesseract (lightweight OCR)
-def extract_text_with_tesseract(image_bytes):
-    """Extract text using Tesseract OCR"""
+def preprocess_image(image):
+    """Enhance image quality for better OCR results"""
     try:
-        image = Image.open(io.BytesIO(image_bytes))
         # Convert to RGB if needed
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
-        # Extract text
-        text = pytesseract.image_to_string(image, config='--psm 6')
-        return text.strip()
+        # Increase DPI (scale up for better OCR)
+        width, height = image.size
+        if width < 1000 or height < 1000:
+            scale_factor = max(1000/width, 1000/height)
+            new_size = (int(width * scale_factor), int(height * scale_factor))
+            image = image.resize(new_size, Image.Resampling.LANCZOS)
+        
+        # Enhance contrast
+        enhancer = ImageEnhance.Contrast(image)
+        image = enhancer.enhance(1.5)
+        
+        # Enhance sharpness
+        enhancer = ImageEnhance.Sharpness(image)
+        image = enhancer.enhance(2.0)
+        
+        # Convert to grayscale for better OCR
+        image = image.convert('L')
+        
+        return image
     except Exception as e:
-        print(f"Tesseract OCR failed: {e}")
+        print(f"Image preprocessing failed: {e}")
+        return image
+
+def extract_text_from_pdf(pdf_bytes):
+    """Extract text from PDF by converting pages to images"""
+    try:
+        pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        all_text = ""
+        
+        for page_num in range(min(3, len(pdf_document))):  # Limit to first 3 pages
+            page = pdf_document[page_num]
+            # Convert page to image
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom for better quality
+            img_data = pix.tobytes("png")
+            
+            # Process with OCR
+            image = Image.open(io.BytesIO(img_data))
+            processed_image = preprocess_image(image)
+            text = pytesseract.image_to_string(processed_image, config='--psm 6')
+            all_text += f"\n--- Page {page_num + 1} ---\n{text}\n"
+        
+        pdf_document.close()
+        return all_text.strip()
+    except Exception as e:
+        print(f"PDF processing failed: {e}")
+        return None
+
+def extract_text_with_enhanced_ocr(image_bytes, file_type):
+    """Enhanced OCR with preprocessing and PDF support"""
+    try:
+        if file_type == "application/pdf":
+            return extract_text_from_pdf(image_bytes)
+        else:
+            # Handle images
+            image = Image.open(io.BytesIO(image_bytes))
+            processed_image = preprocess_image(image)
+            text = pytesseract.image_to_string(processed_image, config='--psm 6')
+            return text.strip()
+    except Exception as e:
+        print(f"Enhanced OCR failed: {e}")
         return None
 
 class ExtractionResult(BaseModel):
@@ -55,12 +110,22 @@ class ErrorResponse(BaseModel):
     detail: str
 
 def extract_vendor_name(text: str) -> Optional[str]:
-    """Extract vendor name from the first few lines of text"""
+    """Extract vendor name with improved logic"""
     lines = text.split('\n')
-    for line in lines[:5]:  # Check first 5 lines
+    
+    # Look for common business indicators
+    business_indicators = ['restaurant', 'cafe', 'store', 'shop', 'company', 'inc', 'llc', 'corp']
+    
+    for line in lines[:8]:  # Check first 8 lines
         line = line.strip()
-        if len(line) > 3 and not re.match(r'^\d+$', line):  # Not just numbers
-            return line
+        if len(line) > 3 and not re.match(r'^\d+$', line):
+            # Check if line contains business indicators
+            if any(indicator in line.lower() for indicator in business_indicators):
+                return line
+            # Check if line looks like a business name (no numbers, reasonable length)
+            if not re.search(r'\d{4,}', line) and 3 <= len(line) <= 50:
+                return line
+    
     return None
 
 def extract_date(text: str) -> Optional[str]:
@@ -146,33 +211,18 @@ async def extract_invoice_data(file: UploadFile = File(...)):
         # Read file content
         content = await file.read()
         
-        # Run OCR with Tesseract
-        raw_text = extract_text_with_tesseract(content)
+        # Run enhanced OCR with preprocessing and PDF support
+        raw_text = extract_text_with_enhanced_ocr(content, file.content_type)
         
-        if not raw_text:
-            # Fallback: Mock OCR for testing (when Tesseract fails)
-            raw_text = """
-            MOCK INVOICE DATA
-            Restaurant ABC
-            123 Main Street
-            City, State 12345
-            
-            Invoice #: INV-2024-001
-            Date: 12/25/2023
-            
-            Item 1: Coffee        $4.50
-            Item 2: Sandwich      $8.99
-            Item 3: Dessert       $5.25
-            
-            Subtotal:            $18.74
-            Tax:                 $1.50
-            Total:               $20.24
-            
-            Thank you for your business!
-            """
-            confidence_scores = [0.75]  # Lower confidence for mock data
-        else:
-            confidence_scores = [0.85]  # Tesseract general confidence
+        if not raw_text or len(raw_text.strip()) < 10:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not extract text from the uploaded file. Please try a clearer image or PDF."
+            )
+        
+        # Calculate confidence based on text length and content quality
+        confidence = min(0.95, 0.5 + (len(raw_text) / 1000) * 0.3)
+        confidence_scores = [confidence]
         
         if not raw_text.strip():
             raise HTTPException(

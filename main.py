@@ -139,7 +139,7 @@ def extract_text_with_enhanced_ocr(image_bytes, file_type):
             if result and len(result.strip()) > 3:
                 return result
         return None
-    except Exception as e:
+except Exception as e:
         print(f"Enhanced OCR failed: {e}")
         return None
 
@@ -161,17 +161,27 @@ def extract_vendor_name(text: str) -> Optional[str]:
     lines = text.split('\n')
     
     # Look for common business indicators
-    business_indicators = ['restaurant', 'cafe', 'store', 'shop', 'company', 'inc', 'llc', 'corp']
+    business_indicators = ['restaurant', 'cafe', 'store', 'shop', 'company', 'inc', 'llc', 'corp', 'bank', 'pay', 'opay', 'paypal', 'stripe']
+    
+    # First, look for specific payment platforms
+    payment_platforms = ['OPay', 'PayPal', 'Stripe', 'Square', 'Venmo', 'Cash App', 'Zelle']
+    for platform in payment_platforms:
+        if platform.lower() in text.lower():
+            return platform
     
     for line in lines[:8]:  # Check first 8 lines
         line = line.strip()
         if len(line) > 3 and not re.match(r'^\d+$', line):
+            # Skip bullet points and special characters
+            if line.startswith('•') or line.startswith('-') or line.startswith('*'):
+                line = line[1:].strip()
+            
             # Check if line contains business indicators
             if any(indicator in line.lower() for indicator in business_indicators):
                 return line
             # Check if line looks like a business name (no numbers, reasonable length)
             if not re.search(r'\d{4,}', line) and 3 <= len(line) <= 50:
-                return line
+            return line
     
     return None
 
@@ -183,6 +193,8 @@ def extract_date(text: str) -> Optional[str]:
         r'\b(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})\b',  # YYYY/MM/DD
         r'\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{2,4})\b',  # DD Mon YYYY
         r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{1,2}),?\s+(\d{2,4})\b',  # Mon DD, YYYY
+        # Ordinal date formats (1st, 2nd, 3rd, 4th, etc.)
+        r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{2,4})\b',  # Mon 13th, 2025
         # More flexible patterns
         r'\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b',  # MM/DD/YYYY
         r'\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})\b',  # MM/DD/YYYY
@@ -217,6 +229,7 @@ def extract_total_amount(text: str) -> Optional[float]:
     """Extract total amount using various patterns with better filtering"""
     # Look for currency patterns with better context
     currency_patterns = [
+        # Dollar patterns
         r'total[:\s]*\$?(\d+\.?\d{1,2})',  # Allow 1-2 decimal places
         r'amount[:\s]*\$?(\d+\.?\d{1,2})',
         r'sum[:\s]*\$?(\d+\.?\d{1,2})',
@@ -225,10 +238,18 @@ def extract_total_amount(text: str) -> Optional[float]:
         r'amount\s*due[:\s]*\$?(\d+\.?\d{1,2})',
         r'\$(\d+\.?\d{1,2})',  # Dollar sign with 1-2 decimals
         r'(\d+\.?\d{1,2})\s*dollars?',
+        # Korean Won patterns
+        r'₩(\d+\.?\d{1,2})',  # Korean Won symbol
+        r'(\d+\.?\d{1,2})\s*won',
+        # Other currency patterns
+        r'€(\d+\.?\d{1,2})',  # Euro
+        r'£(\d+\.?\d{1,2})',  # Pound
+        r'¥(\d+\.?\d{1,2})',  # Yen
         # More flexible patterns
         r'total[:\s]*\$?(\d+\.?\d*)',  # Any decimal places
         r'amount[:\s]*\$?(\d+\.?\d*)',
         r'\$(\d+\.?\d*)',  # Any dollar amount
+        r'₩(\d+\.?\d*)',  # Any Korean Won amount
     ]
     
     # Filter out common false positives
@@ -266,13 +287,13 @@ def extract_total_amount(text: str) -> Optional[float]:
     # If no clear currency patterns found, look for the largest reasonable number
     if not has_false_positives:
         numbers = re.findall(r'\b(\d+\.?\d{2})\b', text)  # Only 2 decimal places
-        if numbers:
-            try:
+    if numbers:
+        try:
                 amounts = [float(num) for num in numbers if 0.01 <= float(num) <= 10000]
-                if amounts:
+            if amounts:
                     return max(amounts)  # Return the largest reasonable amount
-            except ValueError:
-                pass
+        except ValueError:
+            pass
     
     return None
 
@@ -280,7 +301,10 @@ def categorize_invoice(text: str) -> str:
     """Simple categorization based on keywords"""
     text_lower = text.lower()
     
-    if any(word in text_lower for word in ['restaurant', 'food', 'dining', 'cafe', 'bar']):
+    # Banking/Finance indicators (check first as they're most specific)
+    if any(word in text_lower for word in ['bank', 'banking', 'transaction', 'payment', 'transfer', 'opay', 'paypal', 'stripe', 'recipient', 'sender', 'account', 'deposit', 'withdrawal']):
+        return 'Banking & Finance'
+    elif any(word in text_lower for word in ['restaurant', 'food', 'dining', 'cafe', 'bar']):
         return 'Food & Dining'
     elif any(word in text_lower for word in ['gas', 'fuel', 'petrol', 'station']):
         return 'Transportation'
@@ -297,18 +321,18 @@ def detect_transaction_status(text: str) -> str:
     """Detect transaction status from text"""
     text_lower = text.lower()
     
-    # Success indicators
-    success_indicators = ['paid', 'completed', 'successful', 'approved', 'processed', 'confirmed']
+    # Success indicators (more comprehensive)
+    success_indicators = ['paid', 'completed', 'successful', 'approved', 'processed', 'confirmed', 'success', 'done', 'finished']
     if any(indicator in text_lower for indicator in success_indicators):
         return 'Success'
     
     # Pending indicators
-    pending_indicators = ['pending', 'processing', 'in progress', 'waiting', 'queued']
+    pending_indicators = ['pending', 'processing', 'in progress', 'waiting', 'queued', 'pending approval']
     if any(indicator in text_lower for indicator in pending_indicators):
         return 'Pending'
     
     # Failed indicators
-    failed_indicators = ['failed', 'declined', 'rejected', 'error', 'cancelled', 'void']
+    failed_indicators = ['failed', 'declined', 'rejected', 'error', 'cancelled', 'void', 'denied', 'unsuccessful']
     if any(indicator in text_lower for indicator in failed_indicators):
         return 'Failed'
     
@@ -342,7 +366,7 @@ async def extract_invoice_data(file: UploadFile = File(...)):
         raw_text = extract_text_with_enhanced_ocr(content, file.content_type)
         
         if not raw_text or len(raw_text.strip()) < 3:
-            raise HTTPException(
+                raise HTTPException(
                 status_code=400,
                 detail="Could not extract text from the uploaded file. Please try a clearer image or PDF."
             )

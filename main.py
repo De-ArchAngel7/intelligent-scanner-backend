@@ -149,6 +149,7 @@ class ExtractionResult(BaseModel):
     date: Optional[str] = None
     total_amount: Optional[float] = None
     category: Optional[str] = None
+    transaction_status: Optional[str] = None
     confidence: float = 0.0
 
 class ErrorResponse(BaseModel):
@@ -175,31 +176,59 @@ def extract_vendor_name(text: str) -> Optional[str]:
     return None
 
 def extract_date(text: str) -> Optional[str]:
-    """Extract date using various patterns"""
+    """Extract date using various patterns with better accuracy"""
     date_patterns = [
+        # Common date formats
         r'\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b',  # MM/DD/YYYY or DD/MM/YYYY
         r'\b(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})\b',  # YYYY/MM/DD
         r'\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{2,4})\b',  # DD Mon YYYY
         r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{1,2}),?\s+(\d{2,4})\b',  # Mon DD, YYYY
+        # More flexible patterns
+        r'\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b',  # MM/DD/YYYY
+        r'\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})\b',  # MM/DD/YYYY
+        r'\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2})\b',  # MM/DD/YY
+        # Look for date keywords
+        r'(?:date|on|issued|created)[:\s]*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})',
+        r'(?:date|on|issued|created)[:\s]*(\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})',
     ]
     
+    # First try patterns with context
     for pattern in date_patterns:
         matches = re.findall(pattern, text, re.IGNORECASE)
         if matches:
-            return matches[0] if isinstance(matches[0], str) else '/'.join(matches[0])
+            if isinstance(matches[0], tuple):
+                return '/'.join(matches[0])
+            return matches[0]
+    
+    # If no context patterns work, try simple date patterns
+    simple_patterns = [
+        r'\b(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})\b',
+        r'\b(\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})\b',
+    ]
+    
+    for pattern in simple_patterns:
+        matches = re.findall(pattern, text)
+        if matches:
+            return matches[0]
+    
     return None
 
 def extract_total_amount(text: str) -> Optional[float]:
     """Extract total amount using various patterns with better filtering"""
     # Look for currency patterns with better context
     currency_patterns = [
-        r'total[:\s]*\$?(\d+\.?\d{2})',  # Must have 2 decimal places
-        r'amount[:\s]*\$?(\d+\.?\d{2})',
-        r'sum[:\s]*\$?(\d+\.?\d{2})',
-        r'grand\s*total[:\s]*\$?(\d+\.?\d{2})',
-        r'subtotal[:\s]*\$?(\d+\.?\d{2})',
-        r'\$(\d+\.?\d{2})',  # Dollar sign with 2 decimals
-        r'(\d+\.?\d{2})\s*dollars?',
+        r'total[:\s]*\$?(\d+\.?\d{1,2})',  # Allow 1-2 decimal places
+        r'amount[:\s]*\$?(\d+\.?\d{1,2})',
+        r'sum[:\s]*\$?(\d+\.?\d{1,2})',
+        r'grand\s*total[:\s]*\$?(\d+\.?\d{1,2})',
+        r'subtotal[:\s]*\$?(\d+\.?\d{1,2})',
+        r'amount\s*due[:\s]*\$?(\d+\.?\d{1,2})',
+        r'\$(\d+\.?\d{1,2})',  # Dollar sign with 1-2 decimals
+        r'(\d+\.?\d{1,2})\s*dollars?',
+        # More flexible patterns
+        r'total[:\s]*\$?(\d+\.?\d*)',  # Any decimal places
+        r'amount[:\s]*\$?(\d+\.?\d*)',
+        r'\$(\d+\.?\d*)',  # Any dollar amount
     ]
     
     # Filter out common false positives
@@ -264,6 +293,31 @@ def categorize_invoice(text: str) -> str:
     else:
         return 'Other'
 
+def detect_transaction_status(text: str) -> str:
+    """Detect transaction status from text"""
+    text_lower = text.lower()
+    
+    # Success indicators
+    success_indicators = ['paid', 'completed', 'successful', 'approved', 'processed', 'confirmed']
+    if any(indicator in text_lower for indicator in success_indicators):
+        return 'Success'
+    
+    # Pending indicators
+    pending_indicators = ['pending', 'processing', 'in progress', 'waiting', 'queued']
+    if any(indicator in text_lower for indicator in pending_indicators):
+        return 'Pending'
+    
+    # Failed indicators
+    failed_indicators = ['failed', 'declined', 'rejected', 'error', 'cancelled', 'void']
+    if any(indicator in text_lower for indicator in failed_indicators):
+        return 'Failed'
+    
+    # Default to success if we have amount and date (likely a receipt)
+    if extract_total_amount(text) and extract_date(text):
+        return 'Success'
+    
+    return 'Unknown'
+
 @app.get("/")
 async def root():
     return {"message": "Intelligent Scanner API is running!"}
@@ -311,6 +365,7 @@ async def extract_invoice_data(file: UploadFile = File(...)):
         date = extract_date(raw_text)
         total_amount = extract_total_amount(raw_text)
         category = categorize_invoice(raw_text)
+        transaction_status = detect_transaction_status(raw_text)
         
         return ExtractionResult(
             raw_text=raw_text.strip(),
@@ -318,6 +373,7 @@ async def extract_invoice_data(file: UploadFile = File(...)):
             date=date,
             total_amount=total_amount,
             category=category,
+            transaction_status=transaction_status,
             confidence=avg_confidence
         )
         

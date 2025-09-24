@@ -139,7 +139,7 @@ def extract_text_with_enhanced_ocr(image_bytes, file_type):
             if result and len(result.strip()) > 3:
                 return result
         return None
-except Exception as e:
+    except Exception as e:
         print(f"Enhanced OCR failed: {e}")
         return None
 

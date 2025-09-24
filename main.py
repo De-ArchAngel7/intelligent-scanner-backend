@@ -86,13 +86,17 @@ def extract_text_with_enhanced_ocr(image_bytes, file_type):
     """Enhanced OCR with preprocessing and PDF support"""
     try:
         if file_type == "application/pdf":
-            return extract_text_from_pdf(image_bytes)
+            result = extract_text_from_pdf(image_bytes)
+            if result and len(result.strip()) > 3:
+                return result
         else:
             # Handle images
             image = Image.open(io.BytesIO(image_bytes))
             processed_image = preprocess_image(image)
             text = pytesseract.image_to_string(processed_image, config='--psm 6')
-            return text.strip()
+            if text and len(text.strip()) > 3:
+                return text.strip()
+        return None
     except Exception as e:
         print(f"Enhanced OCR failed: {e}")
         return None
@@ -214,14 +218,26 @@ async def extract_invoice_data(file: UploadFile = File(...)):
         # Run enhanced OCR with preprocessing and PDF support
         raw_text = extract_text_with_enhanced_ocr(content, file.content_type)
         
-        if not raw_text or len(raw_text.strip()) < 10:
+        # If enhanced OCR fails, try basic Tesseract as fallback
+        if not raw_text or len(raw_text.strip()) < 5:
+            print("Enhanced OCR failed, trying basic Tesseract...")
+            try:
+                image = Image.open(io.BytesIO(content))
+                if image.mode != 'RGB':
+                    image = image.convert('RGB')
+                raw_text = pytesseract.image_to_string(image, config='--psm 6')
+            except Exception as e:
+                print(f"Basic OCR also failed: {e}")
+                raw_text = None
+        
+        if not raw_text or len(raw_text.strip()) < 3:
             raise HTTPException(
                 status_code=400,
                 detail="Could not extract text from the uploaded file. Please try a clearer image or PDF."
             )
         
         # Calculate confidence based on text length and content quality
-        confidence = min(0.95, 0.5 + (len(raw_text) / 1000) * 0.3)
+        confidence = min(0.95, 0.3 + (len(raw_text) / 1000) * 0.4)
         confidence_scores = [confidence]
         
         if not raw_text.strip():

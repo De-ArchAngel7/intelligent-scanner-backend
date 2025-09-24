@@ -190,33 +190,60 @@ def extract_date(text: str) -> Optional[str]:
     return None
 
 def extract_total_amount(text: str) -> Optional[float]:
-    """Extract total amount using various patterns"""
-    # Look for currency patterns
+    """Extract total amount using various patterns with better filtering"""
+    # Look for currency patterns with better context
     currency_patterns = [
-        r'total[:\s]*\$?(\d+\.?\d*)',
-        r'amount[:\s]*\$?(\d+\.?\d*)',
-        r'sum[:\s]*\$?(\d+\.?\d*)',
-        r'\$(\d+\.?\d*)',  # Simple dollar amount
-        r'(\d+\.?\d*)\s*dollars?',
+        r'total[:\s]*\$?(\d+\.?\d{2})',  # Must have 2 decimal places
+        r'amount[:\s]*\$?(\d+\.?\d{2})',
+        r'sum[:\s]*\$?(\d+\.?\d{2})',
+        r'grand\s*total[:\s]*\$?(\d+\.?\d{2})',
+        r'subtotal[:\s]*\$?(\d+\.?\d{2})',
+        r'\$(\d+\.?\d{2})',  # Dollar sign with 2 decimals
+        r'(\d+\.?\d{2})\s*dollars?',
     ]
+    
+    # Filter out common false positives
+    false_positive_indicators = [
+        'session id', 'order id', 'receipt id', 'transaction id',
+        'phone number', 'zip code', 'postal code', 'area code',
+        'reference', 'ref', 'tracking', 'confirmation'
+    ]
+    
+    # Check if text contains false positive indicators
+    text_lower = text.lower()
+    has_false_positives = any(indicator in text_lower for indicator in false_positive_indicators)
+    
+    # If we detect potential false positives, be more strict
+    if has_false_positives:
+        # Only look for clearly marked totals
+        strict_patterns = [
+            r'total[:\s]*\$?(\d+\.?\d{2})',
+            r'grand\s*total[:\s]*\$?(\d+\.?\d{2})',
+            r'amount\s*due[:\s]*\$?(\d+\.?\d{2})',
+        ]
+        currency_patterns = strict_patterns
     
     for pattern in currency_patterns:
         matches = re.findall(pattern, text, re.IGNORECASE)
         if matches:
             try:
-                return float(matches[0])
+                amount = float(matches[0])
+                # Reasonable range for invoice amounts
+                if 0.01 <= amount <= 10000:
+                    return amount
             except ValueError:
                 continue
     
-    # Look for the largest number that could be a total
-    numbers = re.findall(r'\b(\d+\.?\d*)\b', text)
-    if numbers:
-        try:
-            amounts = [float(num) for num in numbers if float(num) > 0]
-            if amounts:
-                return max(amounts)  # Return the largest amount found
-        except ValueError:
-            pass
+    # If no clear currency patterns found, look for the largest reasonable number
+    if not has_false_positives:
+        numbers = re.findall(r'\b(\d+\.?\d{2})\b', text)  # Only 2 decimal places
+        if numbers:
+            try:
+                amounts = [float(num) for num in numbers if 0.01 <= float(num) <= 10000]
+                if amounts:
+                    return max(amounts)  # Return the largest reasonable amount
+            except ValueError:
+                pass
     
     return None
 

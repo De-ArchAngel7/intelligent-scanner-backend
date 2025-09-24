@@ -2,14 +2,9 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
-try:
-    import pytesseract
-    from PIL import Image, ImageEnhance, ImageFilter
-    import fitz  # PyMuPDF
-    TESSERACT_AVAILABLE = True
-except ImportError:
-    TESSERACT_AVAILABLE = False
-    print("Warning: Tesseract dependencies not available")
+import requests
+from PIL import Image, ImageEnhance, ImageFilter
+import fitz  # PyMuPDF
 import pandas as pd
 import re
 import io
@@ -35,9 +30,6 @@ app.add_middleware(
 
 def preprocess_image(image):
     """Enhance image quality for better OCR results"""
-    if not TESSERACT_AVAILABLE:
-        return image  # Return original image if Tesseract not available
-    
     try:
         # Convert to RGB if needed
         if image.mode != 'RGB':
@@ -66,13 +58,61 @@ def preprocess_image(image):
         print(f"Image preprocessing failed: {e}")
         return image
 
+def extract_text_from_image_api(image_bytes):
+    """Extract text from image using free OCR API"""
+    try:
+        # Use OCR.space free API (1000 requests per day)
+        api_key = "helloworld"  # Free API key
+        url = "https://api.ocr.space/parse/image"
+        
+        # Prepare the image
+        image = Image.open(io.BytesIO(image_bytes))
+        processed_image = preprocess_image(image)
+        
+        # Convert to bytes
+        img_buffer = io.BytesIO()
+        processed_image.save(img_buffer, format='PNG')
+        img_buffer.seek(0)
+        
+        # Make API request
+        response = requests.post(
+            url,
+            files={"file": ("image.png", img_buffer, "image/png")},
+            data={
+                "apikey": api_key,
+                "language": "eng",
+                "isOverlayRequired": False,
+                "detectOrientation": True,
+                "scale": True,
+                "OCREngine": 2
+            }
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("IsErroredOnProcessing", False):
+                print(f"OCR API error: {result.get('ErrorMessage', 'Unknown error')}")
+                return None
+            
+            parsed_results = result.get("ParsedResults", [])
+            if parsed_results:
+                text = parsed_results[0].get("ParsedText", "")
+                return text.strip() if text.strip() else None
+        
+        print(f"OCR API failed with status: {response.status_code}")
+        return None
+        
+    except Exception as e:
+        print(f"OCR API failed: {e}")
+        return None
+
 def extract_text_from_pdf(pdf_bytes):
     """Extract text from PDF by converting pages to images"""
     try:
         pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
         all_text = ""
         
-        # First try to extract text directly from PDF (no OCR needed)
+        # Extract text directly from PDF (no OCR needed)
         for page_num in range(min(3, len(pdf_document))):  # Limit to first 3 pages
             page = pdf_document[page_num]
             text = page.get_text()
@@ -80,30 +120,7 @@ def extract_text_from_pdf(pdf_bytes):
                 all_text += f"\n--- Page {page_num + 1} ---\n{text}\n"
         
         pdf_document.close()
-        
-        # If we got text directly, return it
-        if all_text.strip():
-            return all_text.strip()
-        
-        # If no text found and Tesseract is available, try OCR on images
-        if TESSERACT_AVAILABLE:
-            pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
-            for page_num in range(min(3, len(pdf_document))):  # Limit to first 3 pages
-                page = pdf_document[page_num]
-                # Convert page to image
-                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom for better quality
-                img_data = pix.tobytes("png")
-                
-                # Process with OCR
-                image = Image.open(io.BytesIO(img_data))
-                processed_image = preprocess_image(image)
-                text = pytesseract.image_to_string(processed_image, config='--psm 6')
-                all_text += f"\n--- Page {page_num + 1} ---\n{text}\n"
-            
-            pdf_document.close()
-            return all_text.strip()
-        else:
-            return None
+        return all_text.strip() if all_text.strip() else None
             
     except Exception as e:
         print(f"PDF processing failed: {e}")
@@ -111,43 +128,19 @@ def extract_text_from_pdf(pdf_bytes):
 
 def extract_text_with_enhanced_ocr(image_bytes, file_type):
     """Enhanced OCR with preprocessing and PDF support"""
-    if not TESSERACT_AVAILABLE:
-        print("Tesseract not available, using fallback extraction")
-        return extract_text_fallback(image_bytes, file_type)
-    
     try:
         if file_type == "application/pdf":
             result = extract_text_from_pdf(image_bytes)
             if result and len(result.strip()) > 3:
                 return result
         else:
-            # Handle images
-            image = Image.open(io.BytesIO(image_bytes))
-            processed_image = preprocess_image(image)
-            text = pytesseract.image_to_string(processed_image, config='--psm 6')
-            if text and len(text.strip()) > 3:
-                return text.strip()
+            # Handle images with OCR API
+            result = extract_text_from_image_api(image_bytes)
+            if result and len(result.strip()) > 3:
+                return result
         return None
     except Exception as e:
         print(f"Enhanced OCR failed: {e}")
-        return extract_text_fallback(image_bytes, file_type)
-
-def extract_text_fallback(image_bytes, file_type):
-    """Fallback text extraction when Tesseract is not available"""
-    try:
-        if file_type == "application/pdf":
-            # Try to extract text from PDF using PyMuPDF
-            doc = fitz.open(stream=image_bytes, filetype="pdf")
-            text = ""
-            for page in doc:
-                text += page.get_text()
-            doc.close()
-            return text.strip() if text.strip() else None
-        else:
-            # For images, return a placeholder that indicates OCR is not available
-            return "OCR_NOT_AVAILABLE"
-    except Exception as e:
-        print(f"Fallback extraction failed: {e}")
         return None
 
 class ExtractionResult(BaseModel):
@@ -266,29 +259,6 @@ async def extract_invoice_data(file: UploadFile = File(...)):
         
         # Run enhanced OCR with preprocessing and PDF support
         raw_text = extract_text_with_enhanced_ocr(content, file.content_type)
-        
-        # Handle fallback case when Tesseract is not available
-        if raw_text == "OCR_NOT_AVAILABLE":
-            raise HTTPException(
-                status_code=400,
-                detail="Image OCR is not available on this server. Please upload a PDF file instead, which can extract text directly."
-            )
-        
-        # If enhanced OCR fails, try basic Tesseract as fallback (only if available)
-        if not raw_text or len(raw_text.strip()) < 5:
-            if TESSERACT_AVAILABLE:
-                print("Enhanced OCR failed, trying basic Tesseract...")
-                try:
-                    image = Image.open(io.BytesIO(content))
-                    if image.mode != 'RGB':
-                        image = image.convert('RGB')
-                    raw_text = pytesseract.image_to_string(image, config='--psm 6')
-                except Exception as e:
-                    print(f"Basic OCR also failed: {e}")
-                    raw_text = None
-            else:
-                print("Tesseract not available, cannot process images")
-                raw_text = None
         
         if not raw_text or len(raw_text.strip()) < 3:
             raise HTTPException(
